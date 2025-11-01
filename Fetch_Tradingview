@@ -124,3 +124,151 @@ if historical_data:
         print(corr_matrix)
 else:
     print("No historical data available for analysis.")
+# Professional Correlation Analysis (Pairwise on Aligned Time Series)
+if len(historical_data) >= 2:
+    print("\nProfessional Correlation Analysis (Pairwise on Aligned Time Series):")
+    
+    # For overall matrix (computed later if possible)
+    all_closes = pd.DataFrame()
+    for k, v in historical_data.items():
+        s = v['close'].copy()
+        s.index = s.index.normalize()  # Normalize to 00:00:00
+        all_closes[k] = s
+    all_closes = all_closes.dropna(how='any')  # Common dates only
+    
+    pairs = [(a, b) for a in historical_data for b in historical_data if a < b]  # Unique pairs
+    
+    for pair in pairs:
+        sym1, sym2 = pair
+        
+        # Per-pair alignment
+        df1 = historical_data[sym1]['close'].copy()
+        df2 = historical_data[sym2]['close'].copy()
+        df1.index = df1.index.normalize()
+        df2.index = df2.index.normalize()
+        
+        # Align on common dates with inner join
+        closes_pair = pd.concat([df1, df2], axis=1, keys=[sym1, sym2]).dropna(how='any')
+        
+        if closes_pair.empty or len(closes_pair) < 2:
+            print(f"Insufficient overlapping data for pair {sym1} vs. {sym2}.")
+            continue
+        
+        # Reindex to full daily range with ffill
+        min_date = closes_pair.index.min()
+        max_date = closes_pair.index.max()
+        full_dates = pd.date_range(start=min_date, end=max_date, freq='D')
+        closes_pair = closes_pair.reindex(full_dates).ffill().dropna()
+        
+        returns_pair = closes_pair.pct_change().dropna()
+        
+        if len(returns_pair) < 2:
+            print(f"Insufficient data after returns calculation for pair {sym1} vs. {sym2}.")
+            continue
+        
+        x = returns_pair[sym1].values
+        y = returns_pair[sym2].values
+        x_level = closes_pair[sym1].values
+        y_level = closes_pair[sym2].values
+        
+        print(f"\nPair: {sym1} vs. {sym2}")
+        
+        # Static Correlations (on returns)
+        pearson_r, pearson_p = stats.pearsonr(x, y)
+        spearman_r, spearman_p = stats.spearmanr(x, y)
+        kendall_r, kendall_p = stats.kendalltau(x, y)
+        print("Static Correlations (on returns):")
+        print(f"  Pearson: r={pearson_r:.4f}, p-value={pearson_p:.4f}")
+        print(f"  Spearman (non-linear rank): r={spearman_r:.4f}, p-value={spearman_p:.4f}")
+        print(f"  Kendall (ordinal association): tau={kendall_r:.4f}, p-value={kendall_p:.4f}")
+        
+        # Mutual Information (non-linear dependency on levels)
+        mi = mutual_info(x_level, y_level)
+        print(f"  Mutual Information (non-linear): {mi:.4f}")
+        
+        # DTW Similarity (pattern matching; lower distance = higher similarity)
+        dtw_dist = dtw(x_level, y_level)
+        dtw_sim = 1 / (1 + dtw_dist)  # Normalized similarity [0,1]
+        print(f"  DTW Distance: {dtw_dist:.4f}, Similarity: {dtw_sim:.4f}")
+        
+        # Rolling Correlation (Pearson on returns, 252-day window ~1 year)
+        rolling_corr = returns_pair[sym1].rolling(window=252).corr(returns_pair[sym2]).dropna()
+        print(f"  Rolling Correlation (252-day): Mean={rolling_corr.mean():.4f}, Std={rolling_corr.std():.4f}")
+        plt.figure(figsize=(12, 6))
+        rolling_corr.plot()
+        plt.title(f"Rolling 252-day Correlation: {sym1} vs. {sym2}")
+        plt.xlabel("Date")
+        plt.ylabel("Correlation")
+        plt.grid(True)
+        plt.show()
+        
+        # Cross-Correlation (lags; max lag=30 days)
+        cross_corrs = ccf(x, y, adjusted=False)[:31]  # First 30 lags + lag0
+        max_lag = np.argmax(np.abs(cross_corrs[1:])) + 1  # Optimal non-zero lag
+        print(f"  Cross-Correlation (optimal lag): {max_lag} days, corr={cross_corrs[max_lag]:.4f}")
+        plt.figure(figsize=(12, 6))
+        plt.stem(range(len(cross_corrs)), cross_corrs)
+        plt.title(f"Cross-Correlation Function: {sym1} vs. {sym2}")
+        plt.xlabel("Lag (days)")
+        plt.ylabel("Correlation")
+        plt.grid(True)
+        plt.show()
+        
+        # Novel Procedure: Bidirectional Optimal Lag Search for Maximum Absolute Correlation
+        # Computes correlations over -30 to +30 lags; positive lag means sym1 leads sym2
+        nlags = 30
+        pos_corrs = ccf(x, y, adjusted=False)[:nlags+1]  # lag 0 to +30 (sym1 leads)
+        neg_corrs = ccf(y, x, adjusted=False)[1:nlags+1][::-1]  # lag -1 to -30 (sym2 leads), flipped
+        full_corrs = np.concatenate((neg_corrs, pos_corrs))
+        full_lags = np.arange(-nlags, nlags+1)
+        abs_corrs = np.abs(full_corrs)
+        opt_idx = np.argmax(abs_corrs)
+        opt_lag = full_lags[opt_idx]
+        opt_corr = full_corrs[opt_idx]
+        print(f"  Optimal Lag for Max Abs Correlation: lag={opt_lag} days, corr={opt_corr:.4f}")
+        if opt_lag > 0:
+            print(f"    Interpretation: {sym1} leads {sym2} by {opt_lag} days at peak correlation.")
+        elif opt_lag < 0:
+            print(f"    Interpretation: {sym2} leads {sym1} by {-opt_lag} days at peak correlation.")
+        else:
+            print(f"    Interpretation: Contemporaneous peak correlation (no lead/lag).")
+        plt.figure(figsize=(12, 6))
+        plt.stem(full_lags, full_corrs)
+        plt.title(f"Bidirectional Cross-Correlation: {sym1} vs. {sym2}")
+        plt.xlabel("Lag (days; positive: sym1 leads)")
+        plt.ylabel("Correlation")
+        plt.grid(True)
+        plt.show()
+        
+        # Granger Causality (predictive; max lag=5, on differenced for stationarity)
+        if len(returns_pair) > 10:  # Need sufficient data for Granger (maxlag+1 min)
+            diff_returns = returns_pair.diff().dropna()  # Ensure stationarity
+            granger_data = diff_returns[[sym1, sym2]].values
+            granger_res = grangercausalitytests(granger_data, maxlag=5, verbose=False)
+            granger_pvals = [granger_res[lag+1][0]['ssr_ftest'][1] for lag in range(5)]  # p-values
+            min_p = min(granger_pvals)
+            best_lag = granger_pvals.index(min_p) + 1
+            print(f"  Granger Causality ({sym1} -> {sym2}): Min p-value={min_p:.4f} at lag={best_lag}")
+            # Reverse direction
+            granger_data_rev = diff_returns[[sym2, sym1]].values
+            granger_res_rev = grangercausalitytests(granger_data_rev, maxlag=5, verbose=False)
+            granger_pvals_rev = [granger_res_rev[lag+1][0]['ssr_ftest'][1] for lag in range(5)]
+            min_p_rev = min(granger_pvals_rev)
+            best_lag_rev = granger_pvals_rev.index(min_p_rev) + 1
+            print(f"  Granger Causality ({sym2} -> {sym1}): Min p-value={min_p_rev:.4f} at lag={best_lag_rev}")
+        else:
+            print("  Insufficient data for Granger Causality tests.")
+    
+    # Overall Correlation Matrix (Pearson on returns), if common data available
+    if not all_closes.empty:
+        all_returns = all_closes.pct_change().dropna()
+        if not all_returns.empty:
+            corr_matrix = all_returns.corr()
+            print("\nOverall Pearson Correlation Matrix (on returns):")
+            print(corr_matrix)
+        else:
+            print("\nNo sufficient data for overall correlation matrix.")
+    else:
+        print("\nNo common dates for all symbols; pairwise analyses only.")
+else:
+    print("Insufficient symbols fetched for correlation analysis (need at least 2).")
