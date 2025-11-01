@@ -71,6 +71,43 @@ for key, info in symbols.items():
         plt.grid(True)
         plt.show()
 
+
+
+# Convert CCM1! prices to USD/ton using USDBRL exchange rate
+# Add this section right after the fetching loop (after 'historical_data = {}' block) and before the multi-symbol plot
+if 'CCM1!' in historical_data and 'USDBRL' in historical_data:
+    ccm_df = historical_data['CCM1!'].copy()
+    usdbrl_df = historical_data['USDBRL'].copy()
+    
+    # Normalize indexes to date-only for alignment (remove time component)
+    ccm_df.index = ccm_df.index.normalize()
+    usdbrl_df.index = usdbrl_df.index.normalize()
+    
+    # Merge on common dates
+    combined = pd.merge(ccm_df[['open', 'high', 'low', 'close', 'volume']], 
+                        usdbrl_df[['close']], 
+                        left_index=True, right_index=True, 
+                        suffixes=('', '_usdbrl'))
+    
+    # Convert to USD/ton: (BRL per 60kg bag * (1000kg/60kg)) / USDBRL
+    bags_per_ton = 1000 / 60
+    for col in ['open', 'high', 'low', 'close']:
+        combined[f'{col}_usd_ton'] = (combined[col] * bags_per_ton) / combined['close_usdbrl']
+    
+    # Update historical_data['CCM1!'] with converted prices (overwrite OHLC, keep volume)
+    historical_data['CCM1!'] = combined[['open_usd_ton', 'high_usd_ton', 'low_usd_ton', 'close_usd_ton', 'volume']]
+    historical_data['CCM1!'].rename(columns={
+        'open_usd_ton': 'open',
+        'high_usd_ton': 'high',
+        'low_usd_ton': 'low',
+        'close_usd_ton': 'close'
+    }, inplace=True)
+    
+    print("Converted CCM1! prices to USD/ton using USDBRL exchange rates.")
+else:
+    print("Skipping CCM1! conversion: Required data (CCM1! and/or USDBRL) not available.")
+
+    
 # Optional: Multi-symbol plot if multiple fetched
 if len(historical_data) > 1:
     plt.figure(figsize=(12, 6))
