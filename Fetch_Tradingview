@@ -1,0 +1,126 @@
+# Install the required library from GitHub in Google Colab (using the active fork with TvDatafeed support)
+!pip install --upgrade --no-cache-dir git+https://github.com/rongardF/tvdatafeed.git
+
+# Import necessary modules
+from tvDatafeed import TvDatafeed, Interval
+import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import datetime
+import time  # For retry sleep
+
+# Initialize TvDatafeed in no-login mode (avoids failed login attempts; data may be limited)
+tv = TvDatafeed()
+print("Using no-login mode; some symbols may be restricted.")
+
+# Define the symbols and exchanges (updated per user notes: BBG for BCOM, FX_IDC for USDBRL/ICE)
+symbols = {
+    'BCOM': {'symbol': 'BCOM', 'exchange': 'BBG'},
+    'CCM1!': {'symbol': 'CCM1!', 'exchange': 'BMFBOVESPA'},
+    'USDBRL': {'symbol': 'USDBRL', 'exchange': 'FX_IDC'}
+}
+
+# Function to fetch historical data from 2021 to today with retry logic
+def fetch_historical_data(symbol, exchange, interval=Interval.in_daily, n_bars=5000, start_date='2021-01-01', retries=3):
+    for attempt in range(retries):
+        try:
+            data = tv.get_hist(symbol=symbol, exchange=exchange, interval=interval, n_bars=n_bars)
+            if data is not None and not data.empty:
+                # Filter to the desired date range
+                data = data[data.index >= pd.to_datetime(start_date)]
+                data = data[data.index <= pd.to_datetime(datetime.now().date())]
+                if not data.empty:
+                    print(f"\nHistorical data for {symbol} on {exchange} ({interval.name} interval) from {start_date} to today:")
+                    print(data.tail(10))  # Display last 10 rows for verification
+                    return data
+                else:
+                    print(f"No data in the specified range for {symbol} on {exchange}.")
+                    return None
+            else:
+                print(f"No historical data retrieved for {symbol} on {exchange} (attempt {attempt+1}/{retries}).")
+        except Exception as e:
+            print(f"Error fetching for {symbol} (attempt {attempt+1}/{retries}): {str(e)}")
+        time.sleep(5)  # Wait before retry
+    print(f"Failed to fetch data for {symbol} after {retries} attempts.")
+    return None
+
+# Main logic: Fetch historical data from 2021-today, save to CSV, plot, and prepare for analysis
+historical_data = {}
+
+for key, info in symbols.items():
+    symbol = info['symbol']
+    exchange = info['exchange']
+    
+    print(f"\nProcessing {key}: {symbol} on {exchange}")
+    
+    # Fetch with retries
+    hist = fetch_historical_data(symbol, exchange)
+    if hist is not None:
+        historical_data[key] = hist
+        
+        # Save to CSV in Colab's /content directory for further analysis/download
+        csv_path = f'/content/{key}_historical_data_2021_to_{datetime.now().date()}.csv'
+        hist.to_csv(csv_path)
+        print(f"Saved historical data to {csv_path}")
+        
+        # Plot the close prices
+        plt.figure(figsize=(12, 6))
+        hist['close'].plot()
+        plt.title(f"{key} Daily Close Prices (2021 to Today)")
+        plt.xlabel("Date")
+        plt.ylabel("Close Price")
+        plt.grid(True)
+        plt.show()
+
+# Optional: Multi-symbol plot if multiple fetched
+if len(historical_data) > 1:
+    plt.figure(figsize=(12, 6))
+    for key, data in historical_data.items():
+        data['close'].plot(label=key)
+    plt.title("Multi-Symbol Daily Close Prices (2021 to Today)")
+    plt.xlabel("Date")
+    plt.ylabel("Close Price")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+# Optional: Enhanced analysis (with correlations if multiple symbols)
+if historical_data:
+    print("\nEnhanced Analysis of Historical Data:")
+    for key, data in historical_data.items():
+        if data is not None and not data.empty:
+            print(f"\nAnalysis for {key}:")
+            data['SMA_20'] = data['close'].rolling(window=20).mean()
+            data['SMA_50'] = data['close'].rolling(window=50).mean()
+            data['SMA_200'] = data['close'].rolling(window=200).mean()  # Long-term trend
+            recent_close = data['close'].iloc[-1]
+            recent_volume = data['volume'].iloc[-1]
+            avg_volume = data['volume'].mean()
+            returns = data['close'].pct_change().dropna()
+            volatility = returns.std() * (252 ** 0.5)  # Annualized volatility
+            print(f"Most recent close: {recent_close:.2f}")
+            print(f"Most recent volume: {recent_volume:.2f}")
+            print(f"Average volume: {avg_volume:.2f}")
+            print(f"Last 20-day SMA: {data['SMA_20'].iloc[-1]:.2f}")
+            print(f"Last 50-day SMA: {data['SMA_50'].iloc[-1]:.2f}")
+            print(f"Last 200-day SMA: {data['SMA_200'].iloc[-1]:.2f}")
+            print(f"Annualized volatility: {volatility:.2%}")
+            # Enhanced trend evaluation
+            if data['close'].iloc[-1] > data['SMA_20'].iloc[-1] > data['SMA_50'].iloc[-1] > data['SMA_200'].iloc[-1]:
+                print("Trend: Strongly Bullish (close > 20-SMA > 50-SMA > 200-SMA)")
+            elif data['close'].iloc[-1] > data['SMA_20'].iloc[-1] > data['SMA_50'].iloc[-1]:
+                print("Trend: Bullish (close > 20-SMA > 50-SMA)")
+            elif data['close'].iloc[-1] < data['SMA_20'].iloc[-1] < data['SMA_50'].iloc[-1] < data['SMA_200'].iloc[-1]:
+                print("Trend: Strongly Bearish (close < 20-SMA < 50-SMA < 200-SMA)")
+            elif data['close'].iloc[-1] < data['SMA_20'].iloc[-1] < data['SMA_50'].iloc[-1]:
+                print("Trend: Bearish (close < 20-SMA < 50-SMA)")
+            else:
+                print("Trend: Neutral or Consolidating")
+    
+    # Correlations if multiple symbols
+    if len(historical_data) > 1:
+        closes = pd.DataFrame({key: data['close'] for key, data in historical_data.items()})
+        corr_matrix = closes.corr()
+        print("\nCorrelation Matrix:")
+        print(corr_matrix)
+else:
+    print("No historical data available for analysis.")
