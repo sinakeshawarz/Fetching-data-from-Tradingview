@@ -161,6 +161,8 @@ if historical_data:
         print(corr_matrix)
 else:
     print("No historical data available for analysis.")
+
+
 # Professional Correlation Analysis (Pairwise on Aligned Time Series)
 if len(historical_data) >= 2:
     print("\nProfessional Correlation Analysis (Pairwise on Aligned Time Series):")
@@ -276,6 +278,47 @@ if len(historical_data) >= 2:
         plt.ylabel("Correlation")
         plt.grid(True)
         plt.show()
+        
+        # Cointegration Analysis (using Engle-Granger two-step method for simplicity and efficiency)
+        # Step 1: Regress levels and test residuals for stationarity (ADF test)
+        if len(closes_pair) > 10:  # Sufficient data
+            try:
+                # OLS regression: sym2 ~ sym1 (or vice versa; we test both directions for robustness)
+                X = sm.add_constant(closes_pair[sym1])
+                model = sm.OLS(closes_pair[sym2], X).fit()
+                residuals = model.resid
+                adf_res = sm.tsa.adfuller(residuals, regression='c')  # ADF test on residuals (constant only)
+                adf_stat = adf_res[0]
+                adf_pval = adf_res[1]
+                print(f"  Cointegration (Engle-Granger):")
+                print(f"    ADF Statistic on Residuals: {adf_stat:.4f}, p-value={adf_pval:.4f}")
+                if adf_pval < 0.05:
+                    print("      Evidence of cointegration (residuals stationary at 5% level) - long-run equilibrium exists.")
+                else:
+                    print("      No evidence of cointegration (residuals non-stationary).")
+                
+                # Reverse direction for comparison
+                X_rev = sm.add_constant(closes_pair[sym2])
+                model_rev = sm.OLS(closes_pair[sym1], X_rev).fit()
+                residuals_rev = model_rev.resid
+                adf_res_rev = sm.tsa.adfuller(residuals_rev, regression='c')
+                adf_stat_rev = adf_res_rev[0]
+                adf_pval_rev = adf_res_rev[1]
+                print(f"    Reverse Direction ADF: Stat={adf_stat_rev:.4f}, p-value={adf_pval_rev:.4f}")
+                
+                # Plot residuals for visual inspection
+                plt.figure(figsize=(12, 6))
+                plt.plot(closes_pair.index, residuals, label='Residuals')
+                plt.title(f"Cointegration Residuals: {sym2} ~ {sym1}")
+                plt.xlabel("Date")
+                plt.ylabel("Residuals")
+                plt.legend()
+                plt.grid(True)
+                plt.show()
+            except Exception as e:
+                print(f"  Cointegration test failed: {str(e)}")
+        else:
+            print("  Insufficient data for cointegration analysis.")
         
         # Granger Causality (predictive; max lag=5, on differenced for stationarity)
         if len(returns_pair) > 10:  # Need sufficient data for Granger (maxlag+1 min)
