@@ -4,9 +4,37 @@
 # Import necessary modules
 from tvDatafeed import TvDatafeed, Interval
 import pandas as pd
+import numpy as np  # Added for arrays in lag search, etc.
+from scipy import stats  # Added for pearsonr, spearmanr, kendalltau
+import statsmodels.api as sm  # Added for OLS in cointegration
+from statsmodels.tsa.stattools import grangercausalitytests, ccf, adfuller  # Added for Granger, CCF, ADF
 import matplotlib.pyplot as plt
 from datetime import datetime
 import time  # For retry sleep
+
+# Function for Mutual Information (binned approximation; non-linear dependency) - Added definition
+def mutual_info(x, y, bins=10):
+    c_xy = np.histogram2d(x, y, bins=bins)[0]
+    mi = 0.
+    for i in range(bins):
+        for j in range(bins):
+            p_xy = c_xy[i, j] / len(x)
+            p_x = np.sum(c_xy[i, :]) / len(x)
+            p_y = np.sum(c_xy[:, j]) / len(x)
+            if p_xy > 0 and p_x > 0 and p_y > 0:
+                mi += p_xy * np.log(p_xy / (p_x * p_y))
+    return mi
+
+# Function for Dynamic Time Warping distance (DTW; for pattern similarity despite shifts) - Added definition
+def dtw(x, y):
+    n, m = len(x), len(y)
+    dt = np.inf * np.ones((n + 1, m + 1))
+    dt[0, 0] = 0
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = (x[i - 1] - y[j - 1]) ** 2
+            dt[i, j] = cost + min(dt[i - 1, j], dt[i, j - 1], dt[i - 1, j - 1])
+    return np.sqrt(dt[-1, -1])
 
 # Initialize TvDatafeed in no-login mode (avoids failed login attempts; data may be limited)
 tv = TvDatafeed()
@@ -45,7 +73,6 @@ def fetch_historical_data(symbol, exchange, interval=Interval.in_daily, n_bars=5
 
 # Main logic: Fetch historical data from 2021-today, save to CSV, plot, and prepare for analysis
 historical_data = {}
-
 for key, info in symbols.items():
     symbol = info['symbol']
     exchange = info['exchange']
@@ -71,10 +98,7 @@ for key, info in symbols.items():
         plt.grid(True)
         plt.show()
 
-
-
 # Convert CCM1! prices to USD/ton using USDBRL exchange rate
-# Add this section right after the fetching loop (after 'historical_data = {}' block) and before the multi-symbol plot
 if 'CCM1!' in historical_data and 'USDBRL' in historical_data:
     ccm_df = historical_data['CCM1!'].copy()
     usdbrl_df = historical_data['USDBRL'].copy()
@@ -84,9 +108,9 @@ if 'CCM1!' in historical_data and 'USDBRL' in historical_data:
     usdbrl_df.index = usdbrl_df.index.normalize()
     
     # Merge on common dates
-    combined = pd.merge(ccm_df[['open', 'high', 'low', 'close', 'volume']], 
-                        usdbrl_df[['close']], 
-                        left_index=True, right_index=True, 
+    combined = pd.merge(ccm_df[['open', 'high', 'low', 'close', 'volume']],
+                        usdbrl_df[['close']],
+                        left_index=True, right_index=True,
                         suffixes=('', '_usdbrl'))
     
     # Convert to USD/ton: (BRL per 60kg bag * (1000kg/60kg)) / USDBRL
@@ -107,7 +131,6 @@ if 'CCM1!' in historical_data and 'USDBRL' in historical_data:
 else:
     print("Skipping CCM1! conversion: Required data (CCM1! and/or USDBRL) not available.")
 
-    
 # Optional: Multi-symbol plot if multiple fetched
 if len(historical_data) > 1:
     plt.figure(figsize=(12, 6))
@@ -120,12 +143,13 @@ if len(historical_data) > 1:
     plt.grid(True)
     plt.show()
 
-# Optional: Enhanced analysis (with correlations if multiple symbols)
+# Optional: Enhanced individual analysis
 if historical_data:
     print("\nEnhanced Analysis of Historical Data:")
     for key, data in historical_data.items():
         if data is not None and not data.empty:
             print(f"\nAnalysis for {key}:")
+            data = data.copy()  # Added to avoid SettingWithCopyWarning
             data['SMA_20'] = data['close'].rolling(window=20).mean()
             data['SMA_50'] = data['close'].rolling(window=50).mean()
             data['SMA_200'] = data['close'].rolling(window=200).mean()  # Long-term trend
@@ -152,16 +176,6 @@ if historical_data:
                 print("Trend: Bearish (close < 20-SMA < 50-SMA)")
             else:
                 print("Trend: Neutral or Consolidating")
-    
-    # Correlations if multiple symbols
-    if len(historical_data) > 1:
-        closes = pd.DataFrame({key: data['close'] for key, data in historical_data.items()})
-        corr_matrix = closes.corr()
-        print("\nCorrelation Matrix:")
-        print(corr_matrix)
-else:
-    print("No historical data available for analysis.")
-
 
 # Professional Correlation Analysis (Pairwise on Aligned Time Series)
 if len(historical_data) >= 2:
@@ -287,7 +301,7 @@ if len(historical_data) >= 2:
                 X = sm.add_constant(closes_pair[sym1])
                 model = sm.OLS(closes_pair[sym2], X).fit()
                 residuals = model.resid
-                adf_res = sm.tsa.adfuller(residuals, regression='c')  # ADF test on residuals (constant only)
+                adf_res = adfuller(residuals, regression='c')  # ADF test on residuals (constant only)
                 adf_stat = adf_res[0]
                 adf_pval = adf_res[1]
                 print(f"  Cointegration (Engle-Granger):")
@@ -301,7 +315,7 @@ if len(historical_data) >= 2:
                 X_rev = sm.add_constant(closes_pair[sym2])
                 model_rev = sm.OLS(closes_pair[sym1], X_rev).fit()
                 residuals_rev = model_rev.resid
-                adf_res_rev = sm.tsa.adfuller(residuals_rev, regression='c')
+                adf_res_rev = adfuller(residuals_rev, regression='c')
                 adf_stat_rev = adf_res_rev[0]
                 adf_pval_rev = adf_res_rev[1]
                 print(f"    Reverse Direction ADF: Stat={adf_stat_rev:.4f}, p-value={adf_pval_rev:.4f}")
